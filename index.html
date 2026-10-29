@@ -1,0 +1,649 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Amazon Clothing Size Chart Converter (CM ↔ Inch)</title>
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4/dist/tesseract.min.js"></script>
+<style>
+*{box-sizing:border-box;font-family:Arial,Helvetica,sans-serif}
+body{max-width:1200px;margin:20px auto;padding:0 16px;background:#f7f9fa;color:#222}
+h1{text-align:center;font-size:22px;margin-bottom:20px}
+.panel{background:#fff;border-radius:10px;padding:18px;margin-bottom:16px;box-shadow:0 1px 4px #00000015}
+.row{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:12px}
+label{font-weight:500;min-width:90px}
+select,input[type="text"],textarea,button{padding:8px 10px;border:1px solid #ccc;border-radius:6px;font-size:14px}
+button{cursor:pointer;background:#2b78e4;color:#fff;border:none}
+button:hover{background:#1f66c9}
+button.secondary{background:#666}
+button.secondary:hover{background:#444}
+textarea{width:100%;min-height:120px}
+#tableWrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;margin:10px 0}
+th,td{border:1px solid #ddd;padding:7px;text-align:center;font-size:13px}
+th{background:#f1f4f8}
+input.cellInput{width:100%;border:none;text-align:center;padding:4px}
+.ocr-status{color:#d04040;font-weight:500}
+#canvasBox{margin-top:10px}
+#sizeCanvas{border:1px solid #eee;background:#fff}
+.copyTip{color:#28a745;display:none}
+.historyItem{padding:6px 8px;background:#f7f7f7;border-radius:4px;margin:4px 0;font-size:13px;cursor:pointer}
+.historyItem:hover{background:#e9e9e9}
+</style>
+</head>
+<body>
+<h1>Amazon Clothing Size Chart Converter (CM ↔ Inch)</h1>
+
+<div class="panel">
+  <div class="row">
+    <label>Template:</label>
+    <select id="templateSel">
+      <option value="apparel">Normal Apparel (Adult XXS-4XL)</option>
+      <option value="swimAdult">Adult Swim Set (XXS-4XL)</option>
+      <option value="swimKids">Kids Swim Set (6Y-16Y)</option>
+    </select>
+    <label>Output Unit:</label>
+    <select id="outUnitSel">
+      <option value="inch">Inch Only</option>
+      <option value="cm">CM Only</option>
+      <option value="both">Inch + CM Combined</option>
+    </select>
+    <label>Show(Swim):</label>
+    <select id="swimShowSel">
+      <option value="both">Top + Bottom</option>
+      <option value="top">Top Only</option>
+      <option value="bottom">Bottom Only</option>
+    </select>
+    <label>Bust Mode:</label>
+    <select id="bustModeSel">
+      <option value="full">Full Bust (Whole Circumference)</option>
+      <option value="half">Half Bust (Flat Lay Side-Side)</option>
+    </select>
+  </div>
+  <div class="row">
+    <label>Canvas W×H:</label>
+    <input type="text" id="canvasSize" value="900,1200" style="width:140px">
+    <button id="genImgBtn">Generate Size Chart Image</button>
+    <button id="downloadImgBtn" class="secondary">Download PNG</button>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <label>Input Text:</label>
+    <button id="parseTextBtn">Parse Text</button>
+    <label>Upload Image OCR:</label>
+    <input type="file" id="imgFile" accept="image/*">
+    <span class="ocr-status" id="ocrStatus"></span>
+  </div>
+  <textarea id="inputText" placeholder="Paste size text here, e.g. XS: Length: 53cm, 1/2 Bust:50cm"></textarea>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <h4 style="margin:0">Size Data Table</h4>
+    <button id="recalcBtn">Recalculate All</button>
+    <button id="clearTableBtn" class="secondary">Clear Table</button>
+  </div>
+  <div id="tableWrap"></div>
+</div>
+
+<div class="panel">
+  <div class="row">
+    <h4 style="margin:0">Output Text (Ready for Amazon Description)</h4>
+    <button id="copyTextBtn">Copy Text</button>
+    <span class="copyTip" id="copyTip">Copied!</span>
+  </div>
+  <textarea id="outText" readonly></textarea>
+</div>
+
+<div class="panel">
+  <h4>Preview Image</h4>
+  <div id="canvasBox">
+    <canvas id="sizeCanvas"></canvas>
+  </div>
+</div>
+
+<div class="panel">
+  <h4>History</h4>
+  <div id="historyBox"></div>
+</div>
+
+<script>
+// ========== CONFIG ==========
+const TEMPLATES = {
+  apparel:{
+    sizes:["XXS","XS","S","M","L","XL","XXL","3XL","4XL"],
+    fields:["Bust","Length","Shoulder","Sleeve","Waist","Hip"],
+    isSwim:false
+  },
+  swimAdult:{
+    sizes:["XXS","XS","S","M","L","XL","XXL","3XL","4XL"],
+    topFields:["Top Length","Bust","Shoulder","Cup Width"],
+    bottomFields:["Bottom Length","Waist","Hip","Inseam"],
+    isSwim:true
+  },
+  swimKids:{
+    sizes:["6Y","7Y","8Y","9Y","10Y","11Y","12Y","13Y","14Y","15Y","16Y"],
+    topFields:["Top Length","Bust","Shoulder","Cup Width"],
+    bottomFields:["Bottom Length","Waist","Hip","Inseam"],
+    isSwim:true
+  }
+};
+const DISCLAIMER = "Please allow 1-2cm difference due to manual measurement. Color may vary slightly due to different screen displays.";
+const STORAGE_KEY = "sizeChartDataV2";
+let state = {
+  activeTemplate:"apparel",
+  bustMode:"full",
+  data:{},
+  history:[]
+};
+// init storage
+const saved = localStorage.getItem(STORAGE_KEY);
+if(saved) state = JSON.parse(saved);
+saveState();
+
+const $ = s=>document.querySelector(s);
+const $$ = s=>document.querySelectorAll(s);
+const templateSel = $("#templateSel");
+const swimShowSel = $("#swimShowSel");
+const outUnitSel = $("#outUnitSel");
+const bustModeSel = $("#bustModeSel");
+const inputText = $("#inputText");
+const parseTextBtn = $("#parseTextBtn");
+const imgFile = $("#imgFile");
+const ocrStatus = $("#ocrStatus");
+const tableWrap = $("#tableWrap");
+const recalcBtn = $("#recalcBtn");
+const clearTableBtn = $("#clearTableBtn");
+const outText = $("#outText");
+const copyTextBtn = $("#copyTextBtn");
+const copyTip = $("#copyTip");
+const canvasSize = $("#canvasSize");
+const genImgBtn = $("#genImgBtn");
+const downloadImgBtn = $("#downloadImgBtn");
+const sizeCanvas = $("#sizeCanvas");
+const historyBox = $("#historyBox");
+const ctx = sizeCanvas.getContext("2d");
+
+function saveState(){
+  localStorage.setItem(STORAGE_KEY,JSON.stringify(state));
+}
+
+function getTpl(){
+  return TEMPLATES[state.activeTemplate];
+}
+
+// inch <-> cm
+function cm2inch(cm){
+  if(isNaN(cm)) return "";
+  return (cm/2.54).toFixed(2);
+}
+function inch2cm(inch){
+  if(isNaN(inch)) return "";
+  return Math.round(inch*2.54);
+}
+
+function renderTemplateUI(){
+  const tpl = getTpl();
+  swimShowSel.style.display = tpl.isSwim ? "inline-flex":"none";
+  renderTable();
+  renderOutputText();
+  renderHistory();
+}
+
+templateSel.onchange = ()=>{
+  state.activeTemplate = templateSel.value;
+  saveState();
+  renderTemplateUI();
+};
+swimShowSel.onchange = ()=>{renderOutputText();renderTable()};
+outUnitSel.onchange = ()=>{renderOutputText()};
+bustModeSel.onchange = ()=>{
+  state.bustMode = bustModeSel.value;
+  saveState();
+  renderOutputText();
+}
+
+// build table
+function renderTable(){
+  const tpl = getTpl();
+  const tid = state.activeTemplate;
+  if(!state.data[tid]) state.data[tid] = {};
+  const tData = state.data[tid];
+  let html = "";
+  if(tpl.isSwim){
+    const show = swimShowSel.value;
+    if(show!=="bottom"){
+      html += `<h4 style="margin:8px 0">Top</h4>`;
+      html += `<table><thead><tr><th>Size</th>`;
+      tpl.topFields.forEach(f=>html+=`<th>${f}</th>`);
+      html += `</tr></thead><tbody>`;
+      tpl.sizes.forEach(s=>{
+        if(!tData[s]) tData[s] = {top:{},bottom:{}};
+        html += `<tr><td>${s}</td>`;
+        tpl.topFields.forEach(f=>{
+          const v = tData[s].top[f] ?? "";
+          html += `<td><input class="cellInput" data-size="${s}" data-type="top" data-field="${f}" value="${v}"></td>`;
+        });
+        html += `</tr>`;
+      })
+      html += `</tbody></table>`;
+    }
+    if(show!=="top"){
+      html += `<h4 style="margin:8px 0">Bottom</h4>`;
+      html += `<table><thead><tr><th>Size</th>`;
+      tpl.bottomFields.forEach(f=>html+=`<th>${f}</th>`);
+      html += `</tr></thead><tbody>`;
+      tpl.sizes.forEach(s=>{
+        if(!tData[s]) tData[s] = {top:{},bottom:{}};
+        html += `<tr><td>${s}</td>`;
+        tpl.bottomFields.forEach(f=>{
+          const v = tData[s].bottom[f] ?? "";
+          html += `<td><input class="cellInput" data-size="${s}" data-type="bottom" data-field="${f}" value="${v}"></td>`;
+        });
+        html += `</tr>`;
+      })
+      html += `</tbody></table>`;
+    }
+  }else{
+    html += `<table><thead><tr><th>Size</th>`;
+    tpl.fields.forEach(f=>html+=`<th>${f}</th>`);
+    html += `</tr></thead><tbody>`;
+    tpl.sizes.forEach(s=>{
+      if(!tData[s]) tData[s] = {};
+      html += `<tr><td>${s}</td>`;
+      tpl.fields.forEach(f=>{
+        const v = tData[s][f] ?? "";
+        html += `<td><input class="cellInput" data-size="${s}" data-field="${f}" value="${v}"></td>`;
+      });
+      html += `</tr>`;
+    })
+    html += `</tbody></table>`;
+  }
+  tableWrap.innerHTML = html;
+  $$(".cellInput").forEach(inp=>{
+    inp.oninput = ()=>{
+      const s = inp.dataset.size;
+      const f = inp.dataset.field;
+      const val = inp.value.trim();
+      const tid = state.activeTemplate;
+      const tpl = getTpl();
+      if(tpl.isSwim){
+        const typ = inp.dataset.type;
+        if(!state.data[tid][s]) state.data[tid][s] = {top:{},bottom:{}};
+        state.data[tid][s][typ][f] = val;
+      }else{
+        if(!state.data[tid][s]) state.data[tid][s] = {};
+        state.data[tid][s][f] = val;
+      }
+      saveState();
+      renderOutputText();
+    }
+  })
+}
+
+// render amazon text output
+function renderOutputText(){
+  const tpl = getTpl();
+  const tid = state.activeTemplate;
+  const tData = state.data[tid]||{};
+  const unitMode = outUnitSel.value;
+  const bustMode = state.bustMode;
+  let lines = [];
+  tpl.sizes.forEach(s=>{
+    const row = tData[s];
+    if(!row) return;
+    const parts = [];
+    if(tpl.isSwim){
+      const show = swimShowSel.value;
+      if(show!=="bottom"){
+        tpl.topFields.forEach(f=>{
+          let raw = row.top?.[f];
+          if(raw === "" || raw === undefined) return;
+          let num = parseFloat(raw);
+          if(isNaN(num)) return;
+          if(f==="Bust" && bustMode==="half") num = num / 2;
+          let inch,cm;
+          if(raw.includes("\"")){ inch = num; cm = inch2cm(inch); }
+          else { cm = num; inch = cm2inch(cm); }
+          const fieldName = (f==="Bust" && bustMode==="half") ? "Half Bust" : f;
+          if(unitMode==="inch") parts.push(`${fieldName}: ${inch}"`);
+          else if(unitMode==="cm") parts.push(`${fieldName}: ${cm}cm`);
+          else parts.push(`${fieldName}: ${inch}"(${cm}cm)`);
+        })
+      }
+      if(show!=="top"){
+        tpl.bottomFields.forEach(f=>{
+          const raw = row.bottom?.[f];
+          if(raw === "" || raw === undefined) return;
+          const num = parseFloat(raw);
+          if(isNaN(num)) return;
+          let inch,cm;
+          if(raw.includes("\"")){ inch = num; cm = inch2cm(inch); }
+          else { cm = num; inch = cm2inch(cm); }
+          if(unitMode==="inch") parts.push(`${f}: ${inch}"`);
+          else if(unitMode==="cm") parts.push(`${f}: ${cm}cm`);
+          else parts.push(`${f}: ${inch}"(${cm}cm)`);
+        })
+      }
+    }else{
+      tpl.fields.forEach(f=>{
+        let raw = row[f];
+        if(raw === "" || raw === undefined) return;
+        let num = parseFloat(raw);
+        if(isNaN(num)) return;
+        if(f==="Bust" && bustMode==="half") num = num / 2;
+        let inch,cm;
+        if(raw.includes("\"")){ inch = num; cm = inch2cm(inch); }
+        else { cm = num; inch = cm2inch(cm); }
+        const fieldName = (f==="Bust" && bustMode==="half") ? "Half Bust" : f;
+        if(unitMode==="inch") parts.push(`${fieldName}: ${inch}"`);
+        else if(unitMode==="cm") parts.push(`${fieldName}: ${cm}cm`);
+        else parts.push(`${fieldName}: ${inch}"(${cm}cm)`);
+      })
+    }
+    if(parts.length>0){
+      lines.push(`${s}: ${parts.join(", ")}`);
+    }
+  })
+  let note = bustMode==="half" ? "<br><br>Note: Half Bust is flat lay side to side measurement." : "";
+  let out = "Size Chart:<br><br>"+lines.join("<br><br>")+note+"<br><br>";
+  outText.value = out;
+}
+
+parseTextBtn.onclick = ()=>{
+  const txt = inputText.value;
+  if(!txt.trim()) return alert("Input text empty");
+  parseSizeText(txt);
+  renderTable();
+  renderOutputText();
+}
+
+function parseSizeText(txt){
+  const tpl = getTpl();
+  const tid = state.activeTemplate;
+  const tData = state.data[tid] = {};
+  // 中文表头映射 + 半胸围识别
+  const mapField = {
+    "衣长":"Length","长度":"Length",
+    "1/2胸围":"Bust","半胸围":"Bust","半围胸围":"Bust","half bust":"Bust","half chest":"Bust",
+    "胸围":"Bust","肩宽":"Shoulder","袖长":"Sleeve","腰围":"Waist","臀围":"Hip"
+  }
+  const clean = txt.replace(/<br\s*\/?>/gi,"\n").replace(/&nbsp;/g," ").replace(/\r/g,"");
+  const lines = clean.split(/\n+/);
+  lines.forEach(line=>{
+    const m = line.match(/^\s*([^:]+)\s*:\s*(.+)$/);
+    if(!m) return;
+    let sz = m[1].trim();
+    const content = m[2];
+    const sizeMap = {"X-Small":"XS","Small":"S","Medium":"M","Large":"L","X-Large":"XL"};
+    if(sizeMap[sz]) sz = sizeMap[sz];
+    if(!tpl.sizes.includes(sz)) return;
+    tData[sz] = tpl.isSwim ? {top:{},bottom:{}} : {};
+    const pairs = content.split(/,\s*/);
+    pairs.forEach(p=>{
+      const pm = p.match(/(.+?):\s*([\d.]+)\s*("|cm)?/);
+      if(!pm) return;
+      let f = pm[1].trim();
+      f = mapField[f] || f;
+      let val = pm[2];
+      const unitMark = pm[3]||"";
+      if(tpl.isSwim){
+        if(tpl.topFields.includes(f)) tData[sz].top[f] = val+unitMark;
+        else if(tpl.bottomFields.includes(f)) tData[sz].bottom[f] = val+unitMark;
+      }else{
+        if(tpl.fields.includes(f)) tData[sz][f] = val+unitMark;
+      }
+    })
+  })
+  state.data[tid] = tData;
+  saveState();
+}
+
+imgFile.onchange = async () => {
+  const file = imgFile.files[0];
+  if (!file) return;
+  ocrStatus.textContent = "Preprocessing Excel table...";
+  try {
+    const img = await loadImage(file);
+    const processed = preprocessTableImage(img);
+    ocrStatus.textContent = "Recognizing...";
+    const res = await Tesseract.recognize(processed, "eng+chi_sim", {
+      logger: m => { if (m.status) ocrStatus.textContent = `OCR: ${m.status}`; },
+      tessedit_char_whitelist: "0123456789.XSMLA-YK+ 1/2abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZcmCMinchIN:\"/-_ ",
+      tessedit_pageseg_mode: "6"
+    });
+    const ocrTxt = res.data.text || "";
+    inputText.value = ocrTxt;
+    if (!ocrTxt.trim()) {
+      ocrStatus.textContent = "OCR done, no text found. Use clearer screenshot.";
+      return;
+    }
+    parseSizeText(ocrTxt);
+    renderTable();
+    renderOutputText();
+    ocrStatus.textContent = "OCR done, check table data.";
+  } catch (e) {
+    console.error(e);
+    ocrStatus.textContent = "OCR failed, try another screenshot.";
+  }
+};
+function loadImage(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = e => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+// 专门适配Excel表格截图的预处理：放大、去网格线、二值化
+function preprocessTableImage(img) {
+  const canvas = document.createElement("canvas");
+  const scale = 2.2;
+  canvas.width = img.width * scale;
+  canvas.height = img.height * scale;
+  const ctx = canvas.getContext("2d");
+  ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+  const imgData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+  const data = imgData.data;
+  for (let i = 0; i < data.length; i += 4) {
+    const r = data[i];
+    const g = data[i + 1];
+    const b = data[i + 2];
+    const gray = 0.299 * r + 0.587 * g + 0.114 * b;
+    const bin = gray > 150 ? 255 : 0;
+    data[i] = bin; data[i + 1] = bin; data[i + 2] = bin;
+  }
+  ctx.putImageData(imgData, 0, 0);
+  return canvas.toDataURL("image/png");
+}
+
+recalcBtn.onclick = ()=>{
+  renderOutputText();
+  alert("Recalculated");
+}
+clearTableBtn.onclick = ()=>{
+  const tid = state.activeTemplate;
+  state.data[tid] = {};
+  saveState();
+  renderTable();
+  renderOutputText();
+}
+
+copyTextBtn.onclick = async ()=>{
+  await navigator.clipboard.writeText(outText.value);
+  copyTip.style.display = "inline";
+  setTimeout(()=>copyTip.style.display="none",1200);
+}
+
+genImgBtn.onclick = ()=>{
+  const tpl = getTpl();
+  const tid = state.activeTemplate;
+  const tData = state.data[tid]||{};
+  const [w,h] = canvasSize.value.split(",").map(Number);
+  sizeCanvas.width = w;
+  sizeCanvas.height = h;
+  ctx.fillStyle="#ffffff";
+  ctx.fillRect(0,0,w,h);
+  ctx.fillStyle="#222";
+  ctx.font="bold 28px Arial";
+  ctx.fillText("Size Chart",30,45);
+  // 增加半围备注
+  const bustMode = state.bustMode;
+  if(bustMode==="half"){
+    ctx.font="16px Arial";
+    ctx.fillStyle="#444";
+    ctx.fillText("Note: Half Bust is measured flat, side to side.",30,75);
+    ctx.fillStyle="#222";
+  }
+  let y = bustMode==="half"?105:80;
+  const padX = 30;
+  const rowH = 36;
+  const cellW = 130;
+  const unitMode = outUnitSel.value;
+  if(tpl.isSwim){
+    const show = swimShowSel.value;
+    if(show!=="bottom"){
+      ctx.font="bold 20px Arial";
+      ctx.fillText("Top",padX,y); y+=rowH;
+      ctx.font="16px Arial";
+      ctx.fillText("Size",padX,y);
+      let cx = padX+cellW;
+      tpl.topFields.forEach(f=>{ ctx.fillText(f==="Bust" && bustMode==="half"?"Half Bust":f,cx,y); cx+=cellW; });
+      y+=rowH;
+      tpl.sizes.forEach(s=>{
+        const row = tData[s];
+        if(!row?.top) return;
+        ctx.fillText(s,padX,y);
+        let cx = padX+cellW;
+        tpl.topFields.forEach(f=>{
+          const raw = row.top[f];
+          if(!raw){ ctx.fillText("-",cx,y); cx+=cellW; return; }
+          let num = parseFloat(raw);
+          if(f==="Bust" && bustMode==="half") num = num / 2;
+          let inch,cm;
+          if(raw.includes("\"")){ inch = num; cm = inch2cm(inch); }
+          else { cm = num; inch = cm2inch(cm); }
+          let disp;
+          if(unitMode==="inch") disp = `${inch}"`;
+          else if(unitMode==="cm") disp = `${cm}cm`;
+          else disp = `${inch}" / ${cm}cm`;
+          ctx.fillText(disp,cx,y);
+          cx+=cellW;
+        })
+        y+=rowH;
+      })
+      y+=20;
+    }
+    if(show!=="top"){
+      ctx.font="bold 20px Arial";
+      ctx.fillText("Bottom",padX,y); y+=rowH;
+      ctx.font="16px Arial";
+      ctx.fillText("Size",padX,y);
+      let cx = padX+cellW;
+      tpl.bottomFields.forEach(f=>{ ctx.fillText(f,cx,y); cx+=cellW; });
+      y+=rowH;
+      tpl.sizes.forEach(s=>{
+        const row = tData[s];
+        if(!row?.bottom) return;
+        ctx.fillText(s,padX,y);
+        let cx = padX+cellW;
+        tpl.bottomFields.forEach(f=>{
+          const raw = row.bottom[f];
+          if(!raw){ ctx.fillText("-",cx,y); cx+=cellW; return; }
+          const num = parseFloat(raw);
+          let inch,cm;
+          if(raw.includes("\"")){ inch = num; cm = inch2cm(inch); }
+          else { cm = num; inch = cm2inch(cm); }
+          let disp;
+          if(unitMode==="inch") disp = `${inch}"`;
+          else if(unitMode==="cm") disp = `${cm}cm`;
+          else disp = `${inch}" / ${cm}cm`;
+          ctx.fillText(disp,cx,y);
+          cx+=cellW;
+        })
+        y+=rowH;
+      })
+      y+=20;
+    }
+  }else{
+    ctx.font="16px Arial";
+    ctx.fillText("Size",padX,y);
+    let cx = padX+cellW;
+    tpl.fields.forEach(f=>{ ctx.fillText(f==="Bust" && bustMode==="half"?"Half Bust":f,cx,y); cx+=cellW; });
+    y+=rowH;
+    tpl.sizes.forEach(s=>{
+      const row = tData[s];
+      if(!row) return;
+      ctx.fillText(s,padX,y);
+      let cx = padX+cellW;
+      tpl.fields.forEach(f=>{
+        const raw = row[f];
+        if(!raw){ ctx.fillText("-",cx,y); cx+=cellW; return; }
+        let num = parseFloat(raw);
+        if(f==="Bust" && bustMode==="half") num = num / 2;
+        let inch,cm;
+        if(raw.includes("\"")){ inch = num; cm = inch2cm(inch); }
+        else { cm = num; inch = cm2inch(cm); }
+        let disp;
+        if(unitMode==="inch") disp = `${inch}"`;
+        else if(unitMode==="cm") disp = `${cm}cm`;
+        else disp = `${inch}" / ${cm}cm`;
+        ctx.fillText(disp,cx,y);
+        cx+=cellW;
+      })
+      y+=rowH;
+    })
+  }
+  ctx.font="14px Arial";
+  ctx.fillStyle="#444";
+  ctx.fillText(DISCLAIMER,padX,h-40);
+  // save history
+  state.history.unshift({
+    tm:new Date().toLocaleString(),
+    template:state.activeTemplate,
+    bustMode:state.bustMode,
+    text:outText.value.substring(0,180)
+  });
+  if(state.history.length>10) state.history.length=10;
+  saveState();
+  renderHistory();
+}
+
+downloadImgBtn.onclick = ()=>{
+  const link = document.createElement("a");
+  link.download = "size-chart.png";
+  link.href = sizeCanvas.toDataURL("image/png");
+  link.click();
+}
+
+function renderHistory(){
+  historyBox.innerHTML = "";
+  state.history.forEach((item,idx)=>{
+    const div = document.createElement("div");
+    div.className = "historyItem";
+    div.innerText = `[${item.tm}] ${item.template} | ${item.bustMode}: ${item.text}`;
+    div.onclick = ()=>{
+      state.activeTemplate = item.template;
+      state.bustMode = item.bustMode;
+      templateSel.value = item.template;
+      bustModeSel.value = item.bustMode;
+      renderTemplateUI();
+    }
+    historyBox.appendChild(div);
+  })
+}
+
+// boot
+templateSel.value = state.activeTemplate;
+bustModeSel.value = state.bustMode;
+renderTemplateUI();
+</script>
+</body>
+</html>
